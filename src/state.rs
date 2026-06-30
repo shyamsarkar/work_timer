@@ -210,10 +210,9 @@ impl AppState {
                     let timer_state = self.timer.state();
 
                     // Track peak idle duration during any non-active phase
-                    if timer_state == TimerState::Running
-                        && duration > self.peak_idle_duration {
-                            self.peak_idle_duration = duration;
-                        }
+                    if timer_state == TimerState::Running && duration > self.peak_idle_duration {
+                        self.peak_idle_duration = duration;
+                    }
 
                     if timer_state == TimerState::Running
                         && self.idle_state == IdleState::Monitoring
@@ -339,13 +338,7 @@ impl AppState {
     fn sync_tray_ui(&self) {
         if let Some(ref handle) = self.tray_handle {
             let new_state = self.timer.state();
-            let elapsed = if let Some(session_id) = self.timer.current_session_id() {
-                self.db
-                    .get_session_elapsed_time(session_id)
-                    .unwrap_or(Duration::ZERO)
-            } else {
-                Duration::ZERO
-            };
+            let elapsed = self.db.get_today_elapsed_time().unwrap_or(Duration::ZERO);
             handle.update(move |t| {
                 t.update_state(new_state, elapsed);
             });

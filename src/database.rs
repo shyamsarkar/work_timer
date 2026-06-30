@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::{Connection, params};
 use std::fs::create_dir_all;
 
@@ -210,6 +210,7 @@ impl Database {
     }
 
     /// Computes the elapsed active duration of a session by processing its event history.
+    #[allow(dead_code)]
     pub fn get_session_elapsed_time(&self, session_id: i64) -> Result<std::time::Duration> {
         let mut stmt = self
             .conn
@@ -238,9 +239,10 @@ impl Database {
                 }
                 "PAUSE" | "AUTO_PAUSE" | "STOP" => {
                     if let Some(start) = active_start
-                        && let Ok(duration) = (created_at - start).to_std() {
-                            total_duration += duration;
-                        }
+                        && let Ok(duration) = (created_at - start).to_std()
+                    {
+                        total_duration += duration;
+                    }
                     active_start = None;
                 }
                 _ => {}
@@ -251,12 +253,102 @@ impl Database {
         if let Some(start) = active_start {
             let now = Utc::now();
             if now > start
-                && let Ok(duration) = (now - start).to_std() {
-                    total_duration += duration;
-                }
+                && let Ok(duration) = (now - start).to_std()
+            {
+                total_duration += duration;
+            }
         }
 
         Ok(total_duration)
+    }
+
+    /// Computes the total elapsed active duration for the current local calendar day.
+    pub fn get_today_elapsed_time(&self) -> Result<std::time::Duration> {
+        let local_now = chrono::Local::now();
+        let today_start_local = local_now.date_naive().and_hms_opt(0, 0, 0).unwrap();
+        let today_start_utc = chrono::Local
+            .from_local_datetime(&today_start_local)
+            .single()
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(|| {
+                local_now.with_timezone(&Utc) - chrono::Duration::try_hours(24).unwrap()
+            });
+
+        // Query all sessions that could possibly have been active today.
+        // That is, sessions that have ended after today_start_utc, or are still active (ended_at IS NULL).
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM sessions WHERE ended_at IS NULL OR ended_at >= ?1")
+            .context("Failed to prepare sessions statement")?;
+
+        let mut rows = stmt
+            .query(params![today_start_utc.to_rfc3339()])
+            .context("Failed to query sessions for today's elapsed time")?;
+
+        let mut total_duration = std::time::Duration::ZERO;
+        let now_utc = Utc::now();
+
+        while let Some(row) = rows.next().context("Failed to iterate sessions")? {
+            let session_id: i64 = row.get(0)?;
+
+            // Get all events for this session
+            let mut event_stmt = self
+                .conn
+                .prepare(
+                    "SELECT event_type, created_at FROM events WHERE session_id = ?1 ORDER BY id ASC"
+                )
+                .context("Failed to prepare events statement")?;
+
+            let mut event_rows = event_stmt
+                .query(params![session_id])
+                .context("Failed to query events for session")?;
+
+            let mut active_start: Option<DateTime<Utc>> = None;
+
+            while let Some(event_row) = event_rows.next().context("Failed to iterate events")? {
+                let event_type: String = event_row.get(0)?;
+                let created_str: String = event_row.get(1)?;
+                let created_at = DateTime::parse_from_rfc3339(&created_str)
+                    .context("Failed to parse event created_at")?
+                    .with_timezone(&Utc);
+
+                match event_type.as_str() {
+                    "START" | "RESUME" => {
+                        active_start = Some(created_at);
+                    }
+                    "PAUSE" | "AUTO_PAUSE" | "STOP" => {
+                        if let Some(start) = active_start {
+                            total_duration +=
+                                overlap_duration(start, created_at, today_start_utc, now_utc);
+                        }
+                        active_start = None;
+                    }
+                    _ => {}
+                }
+            }
+
+            // If session is still active
+            if let Some(start) = active_start {
+                total_duration += overlap_duration(start, now_utc, today_start_utc, now_utc);
+            }
+        }
+
+        Ok(total_duration)
+    }
+}
+
+fn overlap_duration(
+    a: DateTime<Utc>,
+    b: DateTime<Utc>,
+    x: DateTime<Utc>,
+    y: DateTime<Utc>,
+) -> std::time::Duration {
+    let start = a.max(x);
+    let end = b.min(y);
+    if start < end {
+        (end - start).to_std().unwrap_or(std::time::Duration::ZERO)
+    } else {
+        std::time::Duration::ZERO
     }
 }
 
@@ -288,6 +380,115 @@ mod tests {
 
         let elapsed = db.get_session_elapsed_time(session_id)?;
         assert_eq!(elapsed, Duration::from_secs(25)); // 10s + 15s
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_today_elapsed_time() -> Result<()> {
+        let db = Database::in_memory()?;
+
+        // Get local time start of today, convert to UTC
+        let local_now = chrono::Local::now();
+        let today_start_local = local_now.date_naive().and_hms_opt(0, 0, 0).unwrap();
+        let today_start_utc = chrono::Local
+            .from_local_datetime(&today_start_local)
+            .single()
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap()
+            .with_timezone(&Utc);
+
+        // 1. A session yesterday (ended before today)
+        let yesterday_session_id =
+            db.create_session(today_start_utc - chrono::Duration::try_hours(2).unwrap())?;
+        db.log_event(
+            yesterday_session_id,
+            "START",
+            today_start_utc - chrono::Duration::try_hours(2).unwrap(),
+        )?;
+        db.log_event(
+            yesterday_session_id,
+            "STOP",
+            today_start_utc - chrono::Duration::try_hours(1).unwrap(),
+        )?;
+        db.end_session(
+            yesterday_session_id,
+            today_start_utc - chrono::Duration::try_hours(1).unwrap(),
+        )?;
+
+        // 2. A session spanning midnight (started yesterday, ended today)
+        let span_session_id =
+            db.create_session(today_start_utc - chrono::Duration::try_minutes(30).unwrap())?;
+        db.log_event(
+            span_session_id,
+            "START",
+            today_start_utc - chrono::Duration::try_minutes(30).unwrap(),
+        )?;
+        db.log_event(
+            span_session_id,
+            "STOP",
+            today_start_utc + chrono::Duration::try_minutes(15).unwrap(),
+        )?;
+        db.end_session(
+            span_session_id,
+            today_start_utc + chrono::Duration::try_minutes(15).unwrap(),
+        )?;
+        // Expected time today for this session: 15 minutes = 900 seconds.
+
+        // 3. A session today that ended today
+        let session_today =
+            db.create_session(today_start_utc + chrono::Duration::try_hours(1).unwrap())?;
+        db.log_event(
+            session_today,
+            "START",
+            today_start_utc + chrono::Duration::try_hours(1).unwrap(),
+        )?;
+        db.log_event(
+            session_today,
+            "PAUSE",
+            today_start_utc
+                + chrono::Duration::try_hours(1).unwrap()
+                + chrono::Duration::try_minutes(10).unwrap(),
+        )?;
+        db.log_event(
+            session_today,
+            "RESUME",
+            today_start_utc
+                + chrono::Duration::try_hours(1).unwrap()
+                + chrono::Duration::try_minutes(20).unwrap(),
+        )?;
+        db.log_event(
+            session_today,
+            "STOP",
+            today_start_utc
+                + chrono::Duration::try_hours(1).unwrap()
+                + chrono::Duration::try_minutes(35).unwrap(),
+        )?;
+        db.end_session(
+            session_today,
+            today_start_utc
+                + chrono::Duration::try_hours(1).unwrap()
+                + chrono::Duration::try_minutes(35).unwrap(),
+        )?;
+        // Expected time today: 10 mins (start to pause) + 15 mins (resume to stop) = 25 minutes = 1500 seconds.
+
+        // Total expected duration so far today: 900s + 1500s = 2400s (40 minutes)
+        let elapsed = db.get_today_elapsed_time()?;
+        assert_eq!(elapsed, Duration::from_secs(2400));
+
+        // 4. An ongoing session today
+        let now = Utc::now();
+        let ongoing_start = now.max(today_start_utc + chrono::Duration::try_minutes(1).unwrap())
+            - chrono::Duration::try_minutes(5).unwrap();
+
+        let ongoing_session = db.create_session(ongoing_start)?;
+        db.log_event(ongoing_session, "START", ongoing_start)?;
+
+        let elapsed_after_start = db.get_today_elapsed_time()?;
+        let expected_min = Duration::from_secs(2400) + (now - ongoing_start).to_std().unwrap();
+
+        let diff = elapsed_after_start.abs_diff(expected_min);
+        assert!(diff < Duration::from_secs(2));
 
         Ok(())
     }

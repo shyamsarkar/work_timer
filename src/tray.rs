@@ -75,8 +75,8 @@ impl Tray for WorkTimerTray {
         let description = match self.state {
             TimerState::Running => format!("Running: {}", format_duration(self.elapsed)),
             TimerState::Paused => format!("Paused: {}", format_duration(self.elapsed)),
-            TimerState::Idle => "Idle".to_string(),
-            TimerState::Stopped => "Stopped".to_string(),
+            TimerState::Idle => format!("Idle: {}", format_duration(self.elapsed)),
+            TimerState::Stopped => format!("Stopped: {}", format_duration(self.elapsed)),
         };
         ToolTip {
             title,
@@ -89,8 +89,8 @@ impl Tray for WorkTimerTray {
         let time_label = match self.state {
             TimerState::Running => format!("Time: {}", format_duration(self.elapsed)),
             TimerState::Paused => format!("Time: {} (Paused)", format_duration(self.elapsed)),
-            TimerState::Idle => "Time: 00:00:00 (Idle)".into(),
-            TimerState::Stopped => "Time: 00:00:00 (Stopped)".into(),
+            TimerState::Idle => format!("Time: {} (Idle)", format_duration(self.elapsed)),
+            TimerState::Stopped => format!("Time: {} (Stopped)", format_duration(self.elapsed)),
         };
 
         let status_item = StandardItem {
