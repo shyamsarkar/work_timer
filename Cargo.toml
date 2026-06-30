@@ -1,0 +1,23 @@
+[package]
+name = "worktimer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+chrono = { version = "0.4.38", features = ["serde"] }
+notify-rust = "4.11.3"
+ksni = "0.2.2"
+dbus = { version = "0.9.11", features = ["vendored"] }
+libdbus-sys = { version = "0.2.7", features = ["vendored"] }
+x11rb = { version = "0.13.1", features = ["screensaver"] }
+anyhow = "1.0.95"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+serde = { version = "1.0.217", features = ["derive"] }
+toml = "0.8.19"
+dirs = "5.0.1"
+
+[build-dependencies]
+dbus = { version = "0.9.11", features = ["vendored"] }
+libdbus-sys = { version = "0.2.7", features = ["vendored"] }
